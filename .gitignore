@@ -1,0 +1,21 @@
+PROJECT-GOVERN.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Data
+data/pdfs/
+*.pdf
+
+# Env
+.env
+.env.*
+
+# OS
+.DS_Store

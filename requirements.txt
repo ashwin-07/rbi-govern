@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+lxml
+PyMuPDF
+pdfplumber
+psycopg2-binary
+anthropic
+python-dotenv
