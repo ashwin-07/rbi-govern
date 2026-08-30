@@ -17,5 +17,8 @@ data/pdfs/
 .env
 .env.*
 
+# Logs
+logs/
+
 # OS
 .DS_Store

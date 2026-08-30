@@ -5,6 +5,10 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
+from src.logger import get_logger
+
+log = get_logger("rbi_govern.scraper")
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -44,6 +48,8 @@ def _extract_viewstate(soup: BeautifulSoup) -> dict:
         tag = soup.find("input", {"name": name})
         if tag:
             fields[name] = tag.get("value", "")
+    if not fields:
+        log.warning("No ViewState fields found in page — POST may fail")
     return fields
 
 
@@ -73,11 +79,15 @@ def _parse_page(html: str, source_page: str) -> list[dict]:
 
         pdf_link = row.find("a", href=re.compile(r"\.PDF$", re.IGNORECASE))
         if not pdf_link:
+            log.debug("No PDF link for '%s' — skipping", title[:60])
             continue
 
         source_url = pdf_link["href"]
         if not source_url.startswith("http"):
             source_url = "https://rbidocs.rbi.org.in" + source_url
+
+        if not current_date:
+            log.warning("Doc has no date header: '%s' (category: %s)", title[:60], current_category)
 
         if not _is_kyc_relevant(title, current_category):
             continue
@@ -95,93 +105,72 @@ def _parse_page(html: str, source_page: str) -> list[dict]:
     return results
 
 
-def _scrape_notifications() -> list[dict]:
-    url = "https://www.rbi.org.in/Scripts/NotificationUser.aspx"
-    session = requests.Session()
-
+def _scrape_year(session: requests.Session, url: str, post_extras: dict, year: str, source_page: str) -> list[dict]:
+    # Fresh GET per year — reusing a chained ViewState causes ASP.NET to silently
+    # return the default page instead of the requested year.
+    log.debug("GET %s for fresh ViewState (year=%s)", url.split("/")[-1], year)
     resp = session.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "lxml")
-    viewstate = _extract_viewstate(soup)
 
-    # collect current year from initial GET
-    results = _parse_page(resp.text, "notifications")
-    seen_urls = {d["source_url"] for d in results}
+    viewstate = _extract_viewstate(BeautifulSoup(resp.text, "lxml"))
+    if not viewstate:
+        log.error("Could not extract ViewState for year=%s — skipping", year)
+        return []
 
-    for year in NOTIFICATIONS_YEARS:
+    post_data = {**viewstate, **post_extras, "hdnYear": year, "UsrFontCntr$btn": ""}
+    log.debug("POST year=%s to %s", year, url.split("/")[-1])
+    resp = session.post(url, data=post_data, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+
+    docs = _parse_page(resp.text, source_page)
+    log.info("%-4s  %-20s  %d KYC/AML docs found", year, source_page, len(docs))
+    return docs
+
+
+def _scrape_source(url: str, post_extras: dict, source_page: str, years: list[str]) -> list[dict]:
+    session = requests.Session()
+    seen_urls: set[str] = set()
+    results: list[dict] = []
+
+    log.info("Starting scrape: %s (%d years)", source_page, len(years))
+    for year in years:
         time.sleep(1)
-        post_data = {
-            **viewstate,
-            "hdnYear": year,
-            "hdnMonth": "0",
-            "UsrFontCntr$btn": "",
-        }
         try:
-            resp = session.post(url, data=post_data, headers=HEADERS, timeout=30)
-            resp.raise_for_status()
+            docs = _scrape_year(session, url, post_extras, year, source_page)
         except requests.RequestException as e:
-            print(f"Failed to fetch notifications for {year}: {e}")
+            log.error("HTTP error fetching %s year=%s: %s", source_page, year, e)
             continue
 
-        # refresh viewstate for next POST — ASP.NET rotates it each response
-        soup = BeautifulSoup(resp.text, "lxml")
-        viewstate = _extract_viewstate(soup)
-
-        for doc in _parse_page(resp.text, "notifications"):
+        dupes = 0
+        for doc in docs:
             if doc["source_url"] not in seen_urls:
                 seen_urls.add(doc["source_url"])
                 results.append(doc)
+            else:
+                dupes += 1
 
-    return results
+        if dupes:
+            log.debug("year=%s: %d duplicate URLs skipped", year, dupes)
 
-
-def _scrape_master_directions() -> list[dict]:
-    url = "https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx"
-    session = requests.Session()
-
-    resp = session.get(url, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "lxml")
-    viewstate = _extract_viewstate(soup)
-
-    results = _parse_page(resp.text, "master_directions")
-    seen_urls = {d["source_url"] for d in results}
-
-    for year in MASTER_DIR_YEARS:
-        time.sleep(1)
-        post_data = {
-            **viewstate,
-            "hdnYear": year,
-            "UsrFontCntr$btn": "",
-        }
-        try:
-            resp = session.post(url, data=post_data, headers=HEADERS, timeout=30)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            print(f"Failed to fetch master directions for {year}: {e}")
-            continue
-
-        soup = BeautifulSoup(resp.text, "lxml")
-        viewstate = _extract_viewstate(soup)
-
-        for doc in _parse_page(resp.text, "master_directions"):
-            if doc["source_url"] not in seen_urls:
-                seen_urls.add(doc["source_url"])
-                results.append(doc)
-
+    log.info("Finished %s: %d unique docs total", source_page, len(results))
     return results
 
 
 def scrape_all() -> list[dict]:
     results = []
-    try:
-        results += _scrape_notifications()
-    except requests.RequestException as e:
-        print(f"Notifications scrape failed: {e}")
-    try:
-        results += _scrape_master_directions()
-    except requests.RequestException as e:
-        print(f"Master directions scrape failed: {e}")
+    results += _scrape_source(
+        "https://www.rbi.org.in/Scripts/NotificationUser.aspx",
+        {"hdnMonth": "0"},
+        "notifications",
+        NOTIFICATIONS_YEARS,
+    )
+    results += _scrape_source(
+        "https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx",
+        {},
+        "master_directions",
+        MASTER_DIR_YEARS,
+    )
+    log.info("scrape_all complete: %d total unique docs", len(results))
     return results
 
 
