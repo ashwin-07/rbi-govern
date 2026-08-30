@@ -10,12 +10,15 @@ def get_conn():
 
 
 def migrate():
-    sql_path = os.path.join(os.path.dirname(__file__), "..", "migrations", "001_initial.sql")
-    with open(sql_path) as f:
-        sql = f.read()
+    migrations_dir = os.path.join(os.path.dirname(__file__), "..", "migrations")
+    files = sorted(f for f in os.listdir(migrations_dir) if f.endswith(".sql"))
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql)
+            for filename in files:
+                path = os.path.join(migrations_dir, filename)
+                with open(path) as f:
+                    cur.execute(f.read())
+                print(f"  Applied {filename}")
 
 
 def insert_document(doc: dict) -> int | None:

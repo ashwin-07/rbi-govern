@@ -13,11 +13,6 @@ HEADERS = {
     )
 }
 
-PAGES = [
-    ("https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx", "master_directions"),
-    ("https://www.rbi.org.in/Scripts/NotificationUser.aspx", "notifications"),
-]
-
 KYC_TERMS = [
     "kyc",
     "aml",
@@ -33,10 +28,23 @@ DATE_RE = re.compile(
     r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}$"
 )
 
+# KYC Master Directions were issued in 2016; go back to 2015 to catch anything earlier
+NOTIFICATIONS_YEARS = [str(y) for y in range(2015, 2027)]
+MASTER_DIR_YEARS = [str(y) for y in range(2015, 2027)]
+
 
 def _is_kyc_relevant(title: str, category: str) -> bool:
     combined = (title + " " + category).lower()
     return any(term in combined for term in KYC_TERMS)
+
+
+def _extract_viewstate(soup: BeautifulSoup) -> dict:
+    fields = {}
+    for name in ("__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION"):
+        tag = soup.find("input", {"name": name})
+        if tag:
+            fields[name] = tag.get("value", "")
+    return fields
 
 
 def _parse_page(html: str, source_page: str) -> list[dict]:
@@ -87,24 +95,94 @@ def _parse_page(html: str, source_page: str) -> list[dict]:
     return results
 
 
-def scrape_all() -> list[dict]:
-    all_docs = []
+def _scrape_notifications() -> list[dict]:
+    url = "https://www.rbi.org.in/Scripts/NotificationUser.aspx"
+    session = requests.Session()
 
-    for i, (url, source_page) in enumerate(PAGES):
-        if i > 0:
-            time.sleep(1)
+    resp = session.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "lxml")
+    viewstate = _extract_viewstate(soup)
 
+    # collect current year from initial GET
+    results = _parse_page(resp.text, "notifications")
+    seen_urls = {d["source_url"] for d in results}
+
+    for year in NOTIFICATIONS_YEARS:
+        time.sleep(1)
+        post_data = {
+            **viewstate,
+            "hdnYear": year,
+            "hdnMonth": "0",
+            "UsrFontCntr$btn": "",
+        }
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=30)
+            resp = session.post(url, data=post_data, headers=HEADERS, timeout=30)
             resp.raise_for_status()
         except requests.RequestException as e:
-            print(f"Failed to fetch {url}: {e}")
+            print(f"Failed to fetch notifications for {year}: {e}")
             continue
 
-        docs = _parse_page(resp.text, source_page)
-        all_docs.extend(docs)
+        # refresh viewstate for next POST — ASP.NET rotates it each response
+        soup = BeautifulSoup(resp.text, "lxml")
+        viewstate = _extract_viewstate(soup)
 
-    return all_docs
+        for doc in _parse_page(resp.text, "notifications"):
+            if doc["source_url"] not in seen_urls:
+                seen_urls.add(doc["source_url"])
+                results.append(doc)
+
+    return results
+
+
+def _scrape_master_directions() -> list[dict]:
+    url = "https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx"
+    session = requests.Session()
+
+    resp = session.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "lxml")
+    viewstate = _extract_viewstate(soup)
+
+    results = _parse_page(resp.text, "master_directions")
+    seen_urls = {d["source_url"] for d in results}
+
+    for year in MASTER_DIR_YEARS:
+        time.sleep(1)
+        post_data = {
+            **viewstate,
+            "hdnYear": year,
+            "UsrFontCntr$btn": "",
+        }
+        try:
+            resp = session.post(url, data=post_data, headers=HEADERS, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            print(f"Failed to fetch master directions for {year}: {e}")
+            continue
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        viewstate = _extract_viewstate(soup)
+
+        for doc in _parse_page(resp.text, "master_directions"):
+            if doc["source_url"] not in seen_urls:
+                seen_urls.add(doc["source_url"])
+                results.append(doc)
+
+    return results
+
+
+def scrape_all() -> list[dict]:
+    results = []
+    try:
+        results += _scrape_notifications()
+    except requests.RequestException as e:
+        print(f"Notifications scrape failed: {e}")
+    try:
+        results += _scrape_master_directions()
+    except requests.RequestException as e:
+        print(f"Master directions scrape failed: {e}")
+    return results
 
 
 if __name__ == "__main__":
