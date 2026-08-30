@@ -1,8 +1,12 @@
 import re
+from pathlib import Path
 from src.ingest.scraper import scrape_all
 from src.ingest.downloader import download_pdfs
-from src.ingest.extractor import extract_text_pymupdf
+from src.ingest.extractor import extract_text
 from src.db import insert_document
+from src.logger import get_logger
+
+log = get_logger("rbi_govern.pipeline")
 
 # Matches formats like:
 #   RBI/2021-22/123
@@ -30,8 +34,14 @@ def run():
 
     print("Extracting text and inserting into Postgres...")
     inserted = 0
+    seen_paths: set[str] = set()
     for doc, path in zip(docs, local_paths):
-        raw_text = extract_text_pymupdf(path)
+        if Path(path).name in seen_paths:
+            log.debug("Skipping duplicate PDF: %s", Path(path).name)
+            continue
+        seen_paths.add(Path(path).name)
+
+        raw_text = extract_text(path)
         row = {
             "circular_number": _extract_circular_number(raw_text),
             "issue_date": doc["issue_date"] or None,

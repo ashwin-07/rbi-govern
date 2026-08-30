@@ -21,11 +21,19 @@ KYC_TERMS = [
     "kyc",
     "aml",
     "anti-money",
+    "anti money",
     "know your customer",
     "prevention of money",
     "customer due diligence",
+    "customer identification",
     "video-based",
+    "video based",
     "vcip",
+    "cdd",
+    "pmla",
+    "money laundering",
+    "fatf",
+    "beneficial owner",
 ]
 
 DATE_RE = re.compile(
@@ -105,22 +113,38 @@ def _parse_page(html: str, source_page: str) -> list[dict]:
     return results
 
 
-def _scrape_year(session: requests.Session, url: str, post_extras: dict, year: str, source_page: str) -> list[dict]:
-    # Fresh GET per year — reusing a chained ViewState causes ASP.NET to silently
-    # return the default page instead of the requested year.
-    log.debug("GET %s for fresh ViewState (year=%s)", url.split("/")[-1], year)
+def _response_matches_year(html: str, year: str) -> bool:
+    # Date headers look like "Jan 01, 2022" — if the year isn't present the server
+    # returned the default page (usually current year) instead of what we asked for.
+    return bool(re.search(rf',\s*{year}\b', html))
+
+
+def _post_for_year(url: str, post_extras: dict, year: str) -> requests.Response:
+    session = requests.Session()
     resp = session.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
 
     viewstate = _extract_viewstate(BeautifulSoup(resp.text, "lxml"))
     if not viewstate:
-        log.error("Could not extract ViewState for year=%s — skipping", year)
-        return []
+        raise ValueError(f"No ViewState found for year={year}")
 
     post_data = {**viewstate, **post_extras, "hdnYear": year, "UsrFontCntr$btn": ""}
-    log.debug("POST year=%s to %s", year, url.split("/")[-1])
     resp = session.post(url, data=post_data, headers=HEADERS, timeout=30)
     resp.raise_for_status()
+    return resp
+
+
+def _scrape_year(url: str, post_extras: dict, year: str, source_page: str) -> list[dict]:
+    log.debug("Fetching year=%s from %s", year, url.split("/")[-1])
+    resp = _post_for_year(url, post_extras, year)
+
+    if not _response_matches_year(resp.text, year):
+        log.warning("year=%s — response doesn't contain expected year, retrying with fresh session", year)
+        time.sleep(2)
+        resp = _post_for_year(url, post_extras, year)
+        if not _response_matches_year(resp.text, year):
+            log.error("year=%s — retry also returned wrong year, skipping", year)
+            return []
 
     docs = _parse_page(resp.text, source_page)
     log.info("%-4s  %-20s  %d KYC/AML docs found", year, source_page, len(docs))
@@ -128,7 +152,6 @@ def _scrape_year(session: requests.Session, url: str, post_extras: dict, year: s
 
 
 def _scrape_source(url: str, post_extras: dict, source_page: str, years: list[str]) -> list[dict]:
-    session = requests.Session()
     seen_urls: set[str] = set()
     results: list[dict] = []
 
@@ -136,8 +159,8 @@ def _scrape_source(url: str, post_extras: dict, source_page: str, years: list[st
     for year in years:
         time.sleep(1)
         try:
-            docs = _scrape_year(session, url, post_extras, year, source_page)
-        except requests.RequestException as e:
+            docs = _scrape_year(url, post_extras, year, source_page)
+        except (requests.RequestException, ValueError) as e:
             log.error("HTTP error fetching %s year=%s: %s", source_page, year, e)
             continue
 
