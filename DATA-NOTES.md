@@ -101,3 +101,23 @@ The Master Directions listing uses `GetYear(year)` (no `hdnMonth` field), but ou
 `id=62` and `id=63` both have the title "Master Direction — Know Your Customer (KYC) Direction, 2016" with the same `circular_number` (`DBR.AML.BC.No.81/14.01.001/2015-16`). They are different editions: one updated to December 2016, one to July 2018. The `source_url` is different (correctly unique), but downstream queries that group by `circular_number` will conflate them.
 
 > **Note for Week 3:** The amendment graph must treat these as distinct nodes with an `amends` edge between them, not as duplicates.
+
+---
+
+## 7. 2022–2024 notifications: zero KYC/AML docs despite expanded filter
+
+After expanding `KYC_TERMS` to include hyphen variants, `money laundering`, `CDD`, `PMLA`, `FATF`, `beneficial owner`, and `customer identification`, years 2022–2024 still return 0 matches from `NotificationUser.aspx`.
+
+The scraper is working correctly (year validation passes, no HTTP errors). The most likely explanation: RBI restructured how it publishes KYC amendments in this period. Rather than issuing standalone KYC notifications, amendments were embedded in omnibus circulars or consolidated directly into the Master Directions without a separate notification. The 2025 corpus shows a jump to new bank-type-specific KYC Directions (Commercial Banks, NBFCs, etc.) issued as a fresh set — these likely supersede whatever was amended in 2022–2024.
+
+**Impact:** The amendment chain has a gap between 2021 and 2025. Week 3's graph will need to model this as an inferred edge rather than an extracted one.
+
+> **Accepted gap.** Manual search of the RBI site confirms no standalone KYC/AML circulars matching our terms were issued as notifications in 2022–2024. The 2025 Directions reference earlier amendments inline.
+
+---
+
+## 8. Master Directions page lists by latest update date, not issue date
+
+The `BS_ViewMasDirections.aspx` page shows a Master Direction under whichever year it was last updated, not its original issue year. The 2016 KYC Master Direction appears under 2025 because it has been consolidated and re-published multiple times. Years 2016–2024 return 0 docs on the Master Directions page for this reason — not a scraper failure.
+
+This also explains why the 10 Master Direction docs all landed in 2025: they are the current consolidated editions of directions originally issued across several years.
