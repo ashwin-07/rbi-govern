@@ -1,6 +1,6 @@
 import os
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 DSN = os.environ.get("DATABASE_URL", "postgresql://localhost/rbi_govern")
 
@@ -33,6 +33,41 @@ def insert_document(doc: dict) -> int | None:
             cur.execute(sql, doc)
             row = cur.fetchone()
             return row[0] if row else None
+
+
+def get_documents() -> list[dict]:
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id, title, raw_text FROM documents ORDER BY id")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def insert_chunks(chunks: list[dict]) -> None:
+    """Batch-insert chunks. Each dict must have:
+    document_id, chunk_index, strategy, chunk_text, token_count, content_vector (list[float]).
+    ON CONFLICT DO NOTHING so re-running is safe.
+    """
+    if not chunks:
+        return
+    rows = [
+        (
+            c["document_id"],
+            c["chunk_index"],
+            c["strategy"],
+            c["chunk_text"],
+            c["token_count"],
+            c["content_vector"],
+        )
+        for c in chunks
+    ]
+    sql = """
+        INSERT INTO chunks (document_id, chunk_index, strategy, chunk_text, token_count, content_vector)
+        VALUES %s
+        ON CONFLICT (document_id, chunk_index, strategy) DO NOTHING
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            execute_values(cur, sql, rows)
 
 
 def log_llm_call(model: str, purpose: str, prompt_tokens: int, completion_tokens: int, cost_usd: float):

@@ -6,3 +6,4 @@ pdfplumber
 psycopg2-binary
 anthropic
 python-dotenv
+openai
